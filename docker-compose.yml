@@ -1,0 +1,186 @@
+name: orders-poc
+
+# Host ports
+#   8080  Vert.x gateway: UI, gateway API, /docs.html
+#   8081  Spring Boot integration service: /swagger-ui.html (direct, for the defence-in-depth test)
+#   8180  Keycloak (admin / admin)
+#   8443  NiFi UI (https, admin / adminadmin123)
+#   9094  Kafka (host listener)
+#   5433  Postgres (orders / orders)
+
+x-jvm-limits: &small
+  mem_limit: 512m
+
+services:
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: orders
+      POSTGRES_USER: orders
+      POSTGRES_PASSWORD: orders
+    ports: ["5433:5432"]
+    volumes:
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orders -d orders"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  kafka:
+    image: apache/kafka:4.3.1
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://:9092,EXTERNAL://:9094,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_HEAP_OPTS: "-Xms256m -Xmx512m"
+    ports: ["9094:9094"]
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+
+  # One-shot: create topics explicitly (auto-create is off so typos fail loudly).
+  kafka-init:
+    image: apache/kafka:4.3.1
+    depends_on:
+      kafka: { condition: service_healthy }
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        k=/opt/kafka/bin/kafka-topics.sh
+        b="--bootstrap-server kafka:9092 --if-not-exists"
+        $$k $$b --create --topic orders.raw       --partitions 3 --replication-factor 1
+        $$k $$b --create --topic orders.processed --partitions 3 --replication-factor 1
+        $$k $$b --create --topic orders.raw.DLT   --partitions 1 --replication-factor 1
+        $$k $$b --create --topic orders.invalid   --partitions 1 --replication-factor 1
+        $$k $$b --create --topic fx.rates         --partitions 1 --replication-factor 1 --config cleanup.policy=compact
+        $$k --bootstrap-server kafka:9092 --list
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.0
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      # Issuer is always the browser-facing URL; back-channel calls from containers use keycloak:8080.
+      KC_HOSTNAME: http://localhost:8180
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HEALTH_ENABLED: "true"
+      JAVA_OPTS_KC_HEAP: "-Xms256m -Xmx512m"
+    ports: ["8180:8080"]
+    volumes:
+      - ./infra/keycloak/orders-poc-realm.json:/opt/keycloak/data/import/orders-poc-realm.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q UP <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  nifi:
+    image: apache/nifi:2.12.0
+    hostname: nifi   # NiFi binds to and issues its self-signed cert for this name (SNI must match)
+    environment:
+      SINGLE_USER_CREDENTIALS_USERNAME: admin
+      SINGLE_USER_CREDENTIALS_PASSWORD: adminadmin123
+      NIFI_WEB_PROXY_HOST: localhost:8443,nifi:8443
+      NIFI_JVM_HEAP_INIT: 512m
+      NIFI_JVM_HEAP_MAX: 1g
+    ports: ["8443:8443"]   # ListenHTTP :9090 is deliberately NOT published; only the gateway can reach it
+    volumes:
+      - ./data/inbox:/opt/nifi/inbox
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sk -o /dev/null https://$$(hostname):8443/nifi/"]
+      interval: 10s
+      timeout: 5s
+      retries: 40
+
+  # One-shot: build the NiFi flow through the REST API (idempotent).
+  nifi-setup:
+    image: python:3.13-alpine
+    depends_on:
+      nifi: { condition: service_healthy }
+      kafka-init: { condition: service_completed_successfully }
+    environment:
+      NIFI_API: https://nifi:8443/nifi-api
+      KAFKA_BOOTSTRAP: kafka:9092
+    volumes:
+      - ./infra/nifi/provision_flow.py:/provision_flow.py:ro
+    command: ["python", "-u", "/provision_flow.py"]
+
+  integration-service:
+    build: ./integration-service
+    <<: *small
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      KAFKA_BOOTSTRAP: kafka:9092
+      OIDC_ISSUER: http://localhost:8180/realms/orders-poc
+      OIDC_JWKS_URI: http://keycloak:8080/realms/orders-poc/protocol/openid-connect/certs
+    ports: ["8081:8081"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka-init: { condition: service_completed_successfully }
+      keycloak: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/actuator/health/readiness > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  gateway:
+    build: ./gateway
+    <<: *small
+    environment:
+      PUBLIC_URL: http://localhost:8080
+      OIDC_ISSUER: http://localhost:8180/realms/orders-poc
+      OIDC_INTERNAL_ISSUER: http://keycloak:8080/realms/orders-poc
+      OIDC_CLIENT_ID: gateway-ui
+      OIDC_CLIENT_SECRET: gateway-ui-secret
+      NIFI_INGEST_URL: http://nifi:9090/orders
+      ORDERS_API_URL: http://integration-service:8081
+      KAFKA_BOOTSTRAP: kafka:9092
+      RATE_LIMIT_PER_MINUTE: 30
+    ports: ["8080:8080"]
+    depends_on:
+      keycloak: { condition: service_healthy }
+      kafka-init: { condition: service_completed_successfully }
+      integration-service: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  # Simulated external partners: OAuth2 client hitting the gateway + CSV drops into NiFi's inbox.
+  generator:
+    build: ./generator
+    mem_limit: 256m
+    environment:
+      GATEWAY_URL: http://gateway:8080
+      TOKEN_URL: http://keycloak:8080/realms/orders-poc/protocol/openid-connect/token
+      CLIENT_ID: partner-client
+      CLIENT_SECRET: partner-secret
+      INBOX_DIR: /inbox
+      API_INTERVAL_MS: ${GENERATOR_API_INTERVAL_MS:-5000}
+      FILE_INTERVAL_MS: ${GENERATOR_FILE_INTERVAL_MS:-45000}
+      FILE_BATCH_SIZE: 5
+      BAD_RATIO: "0.1"
+    volumes:
+      - ./data/inbox:/inbox
+    depends_on:
+      gateway: { condition: service_healthy }
+      nifi-setup: { condition: service_completed_successfully }

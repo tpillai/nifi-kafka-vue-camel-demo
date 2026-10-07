@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Order Pipeline POC</title>
+  <script src="https://unpkg.com/vue@3.5.13/dist/vue.global.prod.js"></script>
+  <style>
+    :root {
+      --bg: #f6f7f9; --panel: #ffffff; --ink: #1d2433; --muted: #667085; --line: #e4e7ec;
+      --accent: #3b5bdb; --ok: #2b8a3e; --warn: #c77700; --bad: #c92a2a; --chip: #eef2ff;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #11151c; --panel: #1a1f29; --ink: #e6e9ef; --muted: #98a2b3; --line: #2a3140;
+              --accent: #7c95ff; --ok: #51cf66; --warn: #ffb84d; --bad: #ff6b6b; --chip: #232a3a; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; background: var(--bg); color: var(--ink); }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 20px;
+             background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+    h1 { font-size: 17px; margin: 0; }
+    h2 { font-size: 14px; margin: 0 0 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+    main { display: grid; grid-template-columns: 340px 1fr; gap: 16px; padding: 16px 20px; max-width: 1400px; margin: 0 auto; }
+    @media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 16px; } }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; min-width: 0; }
+    .stack { display: grid; gap: 16px; align-content: start; min-width: 0; }
+    label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+    input, select { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); font: inherit; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    button, .btn { display: inline-block; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent);
+                   color: #fff; font: inherit; cursor: pointer; text-decoration: none; }
+    button.secondary, .btn.secondary { background: transparent; color: var(--accent); }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .chip { display: inline-block; padding: 1px 8px; border-radius: 999px; background: var(--chip); font-size: 12px; margin-right: 4px; }
+    .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); } .muted { color: var(--muted); }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+    th { color: var(--muted); font-weight: 600; font-size: 12px; }
+    .scroll { overflow-x: auto; }
+    .feed { max-height: 320px; overflow-y: auto; font-size: 13px; }
+    .feed div { padding: 6px 0; border-bottom: 1px dashed var(--line); }
+    .feed b { margin: 0 6px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+    .msg { margin-top: 10px; font-size: 13px; }
+    .pipeline { display: flex; gap: 6px; flex-wrap: wrap; font-size: 12px; }
+    .stage { padding: 4px 10px; border-radius: 6px; border: 1px solid var(--line); }
+    .stage.done { border-color: var(--ok); color: var(--ok); }
+    .stage.fail { border-color: var(--bad); color: var(--bad); }
+    .center { text-align: center; padding: 60px 20px; }
+  </style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>Order Pipeline POC <span class="muted" style="font-weight:400">Vert.x · NiFi · Kafka · Camel · Postgres · Keycloak</span></h1>
+    <div v-if="me">
+      <span class="chip">{{ me.username }}</span>
+      <span v-for="r in me.roles.filter(r => r.startsWith('orders'))" class="chip">{{ r }}</span>
+      <a class="btn secondary" href="/logout">Log out</a>
+    </div>
+    <div v-else><a class="btn secondary" href="/docs.html">API docs</a> <a class="btn" href="/login">Log in</a></div>
+  </header>
+
+  <div v-if="!me" class="center">
+    <p>Log in with Keycloak. Use <b>alice / alice</b> (can submit and read) or <b>bob / bob</b> (read only).</p>
+    <a class="btn" href="/login">Log in</a>
+  </div>
+
+  <main v-else>
+    <div class="stack">
+      <section class="panel">
+        <h2>Submit an order</h2>
+        <form @submit.prevent="submit">
+          <label>Customer</label>
+          <select v-model="form.customerId">
+            <option v-for="c in customers" :value="c.customerId">{{ c.customerId }} · {{ c.name }} ({{ c.tier }}, limit {{ c.creditLimitUsd }} USD)</option>
+            <option value="C-999">C-999 · unknown customer (goes to DLT)</option>
+          </select>
+          <label>Product</label>
+          <input v-model="form.product" required>
+          <div class="row">
+            <div><label>Quantity</label><input type="number" min="1" v-model.number="form.quantity" required></div>
+            <div><label>Amount</label><input type="number" min="0.01" step="0.01" v-model.number="form.amount" required></div>
+          </div>
+          <div class="row">
+            <div><label>Currency</label><select v-model="form.currency"><option>USD</option><option>EUR</option><option>GBP</option><option>INR</option></select></div>
+            <div><label>Priority</label><select v-model="form.priority"><option>NORMAL</option><option>HIGH</option></select></div>
+          </div>
+          <div style="margin-top:14px"><button :disabled="busy">Submit</button></div>
+        </form>
+        <div class="msg" v-if="message" :class="messageClass">{{ message }}</div>
+        <div v-if="tracked" style="margin-top:12px">
+          <div class="muted mono" style="margin-bottom:6px">{{ tracked.orderId }}</div>
+          <div class="pipeline">
+            <span class="stage done">Gateway 202</span>
+            <span class="stage" :class="tracked.stage >= 1 ? 'done' : ''">NiFi → Kafka</span>
+            <span class="stage" :class="tracked.failed ? 'fail' : (tracked.stage >= 2 ? 'done' : '')">
+              {{ tracked.failed ? 'Camel → DLT' : 'Camel → Postgres' }}</span>
+          </div>
+          <div class="msg" v-if="tracked.result">{{ tracked.result }}</div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>FX rates (per 1 USD)</h2>
+        <table>
+          <tr><th>Currency</th><th>Rate</th><th>As of</th><th>Source</th></tr>
+          <tr v-for="r in rates"><td>{{ r.currency }}</td><td>{{ r.ratePerUsd }}</td><td>{{ r.asOf }}</td>
+            <td :class="r.source === 'frankfurter' ? 'ok' : 'warn'">{{ r.source }}</td></tr>
+        </table>
+        <p class="muted" style="font-size:12px;margin-bottom:0">Live rates come from the public Frankfurter (ECB) API, polled by NiFi every minute.</p>
+      </section>
+    </div>
+
+    <div class="stack">
+      <section class="panel">
+        <h2>Live pipeline events <span class="muted" style="text-transform:none">(Kafka → Vert.x event bus → SSE)</span></h2>
+        <div class="feed">
+          <div v-if="!events.length" class="muted">Waiting for events… the data generator submits an order every few seconds.</div>
+          <div v-for="e in events" :key="e.id">
+            <span class="mono muted">{{ e.time }}</span>
+            <b :class="e.cls"> {{ e.label }}</b>
+            <span> {{ e.text }}</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Processed orders <span class="muted" style="text-transform:none">(Spring Boot API via the gateway)</span></h2>
+        <div class="scroll">
+          <table>
+            <tr><th>Processed</th><th>Customer</th><th>Product</th><th>Amount</th><th>USD</th><th>Status</th><th>Lane</th><th>Source</th><th>By</th></tr>
+            <tr v-for="o in orders" :key="o.orderId" :title="o.reason || o.orderId">
+              <td>{{ new Date(o.processedAt).toLocaleTimeString() }}</td>
+              <td>{{ o.customerId }} <span class="muted">{{ o.customerTier }}</span></td>
+              <td>{{ o.product }} × {{ o.quantity }}</td>
+              <td>{{ o.amount }} {{ o.currency }}</td>
+              <td>{{ o.amountUsd }}</td>
+              <td :class="o.status === 'APPROVED' ? 'ok' : 'bad'">{{ o.status }}</td>
+              <td>{{ o.lane }}</td>
+              <td>{{ o.source }}</td>
+              <td>{{ o.submittedBy }}</td>
+            </tr>
+          </table>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<script>
+const { createApp } = Vue;
+
+createApp({
+  data() {
+    return {
+      me: null, customers: [], orders: [], rates: [], events: [], busy: false,
+      message: '', messageClass: '', tracked: null, seq: 0,
+      form: { customerId: 'C-100', product: 'Widget', quantity: 2, amount: 120.5, currency: 'EUR', priority: 'NORMAL' }
+    };
+  },
+  async mounted() {
+    const res = await fetch('/api/me');
+    if (!res.ok) return;
+    this.me = await res.json();
+    await Promise.all([this.loadCustomers(), this.loadOrders(), this.loadRates()]);
+    setInterval(this.loadRates, 30000);
+    this.listen();
+  },
+  methods: {
+    async get(url) {
+      const res = await fetch(url);
+      return res.ok ? res.json() : [];
+    },
+    async loadCustomers() { this.customers = await this.get('/api/customers'); },
+    async loadOrders() { this.orders = await this.get('/api/orders?limit=25'); },
+    async loadRates() { this.rates = await this.get('/api/fx-rates'); },
+    async submit() {
+      this.busy = true; this.message = '';
+      try {
+        const res = await fetch('/api/orders', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(this.form)
+        });
+        const body = await res.json();
+        if (res.status === 202) {
+          this.message = 'Accepted. Processing is asynchronous; watch the stages below.';
+          this.messageClass = 'ok';
+          this.tracked = { orderId: body.orderId, stage: 1, failed: false, result: '' };
+        } else {
+          this.message = `${res.status} ${body.title}: ${body.detail}`;
+          this.messageClass = 'bad';
+        }
+      } finally {
+        this.busy = false;
+      }
+    },
+    listen() {
+      const source = new EventSource('/api/events');
+      const add = (label, cls, text) => {
+        this.events.unshift({ id: ++this.seq, time: new Date().toLocaleTimeString(), label, cls, text });
+        this.events.length = Math.min(this.events.length, 50);
+      };
+      source.addEventListener('processed', ev => {
+        const e = JSON.parse(ev.data), o = e.order;
+        add(o.status, o.status === 'APPROVED' ? 'ok' : 'warn',
+            `${o.customerId} ${o.amount} ${o.currency} → ${o.amountUsd} USD, lane ${o.lane} (${o.source})${o.reason ? ' · ' + o.reason : ''}`);
+        if (this.tracked && this.tracked.orderId === o.orderId) {
+          this.tracked.stage = 2;
+          this.tracked.result = `${o.status} in lane ${o.lane}${o.reason ? ': ' + o.reason : ''}`;
+        }
+        this.loadOrders();
+      });
+      source.addEventListener('dead-letter', ev => {
+        const e = JSON.parse(ev.data), o = e.order || {};
+        add('DLT', 'bad', `${e['x-error-type']}: ${e['x-error-message']}`);
+        if (this.tracked && this.tracked.orderId === o.orderId) {
+          this.tracked.failed = true; this.tracked.stage = 2;
+          this.tracked.result = `Parked in orders.raw.DLT: ${e['x-error-message']}`;
+        }
+      });
+      source.addEventListener('invalid', ev => {
+        const e = JSON.parse(ev.data);
+        add('REJECTED BY NIFI', 'bad', (e.raw || JSON.stringify(e.order)).slice(0, 140));
+      });
+    }
+  }
+}).mount('#app');
+</script>
+</body>
+</html>

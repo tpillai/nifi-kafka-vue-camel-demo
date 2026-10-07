@@ -1,0 +1,263 @@
+openapi: 3.0.3
+info:
+  title: Order Gateway API (Vert.x)
+  version: 0.1.0
+  description: |
+    Public entry point of the order POC. Machine clients send a Keycloak access token as
+    `Authorization: Bearer <token>`; the browser UI uses a session cookie created by `/login`
+    (OIDC authorization code + PKCE, tokens never leave the server).
+
+    **Write path:** `POST /api/orders` is asynchronous. The gateway mints an `orderId`, forwards the order
+    to NiFi and answers `202 Accepted`. NiFi publishes to Kafka `orders.raw`; Camel enriches, routes and
+    stores it. Poll `GET /api/orders/{orderId}` (404 until processed) or listen on `GET /api/events`.
+
+    **Read path:** `GET` endpoints are proxied to the Spring Boot integration service with the caller's own
+    token (token passthrough); that service validates the token again.
+
+    Get a token for the partner client:
+    ```
+    curl -s -d grant_type=client_credentials -d client_id=partner-client -d client_secret=partner-secret \
+      http://localhost:8180/realms/orders-poc/protocol/openid-connect/token | jq -r .access_token
+    ```
+servers:
+  - url: http://localhost:8080
+security:
+  - bearer: []
+  - session: []
+tags:
+  - name: Orders
+  - name: Reference data
+  - name: Session
+paths:
+  /api/orders:
+    post:
+      tags: [Orders]
+      summary: Submit an order (asynchronous)
+      description: Requires realm role `orders-write`. Rate limited per caller (default 30 per minute).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OrderRequest' }
+            examples:
+              express:
+                summary: GOLD customer, approved in the EXPRESS lane
+                value: { customerId: C-100, product: Widget, quantity: 2, amount: 120.50, currency: EUR, priority: NORMAL }
+              overLimit:
+                summary: BRONZE customer over the 1000 USD credit limit, REJECTED
+                value: { customerId: C-300, product: Server rack, quantity: 1, amount: 5000, currency: USD }
+              unknownCustomer:
+                summary: Passes edge validation, Camel parks it in the DLT
+                value: { customerId: C-999, product: Widget, quantity: 1, amount: 10 }
+      responses:
+        '202':
+          description: Accepted for processing
+          headers:
+            Location: { schema: { type: string }, description: Where to poll for the result }
+            X-RateLimit-Limit: { schema: { type: integer } }
+            X-RateLimit-Remaining: { schema: { type: integer } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Accepted' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '429':
+          description: Rate limit exceeded
+          headers:
+            Retry-After: { schema: { type: integer } }
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          description: NiFi is unreachable or applying backpressure; retry later
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    get:
+      tags: [Orders]
+      summary: List processed orders, newest first
+      description: Requires realm role `orders-read`. Proxied to the integration service.
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [APPROVED, REJECTED] } }
+        - { name: customerId, in: query, schema: { type: string, example: C-100 } }
+        - { name: limit, in: query, schema: { type: integer, default: 50, minimum: 1, maximum: 500 } }
+      responses:
+        '200':
+          description: Orders
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Order' } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+  /api/orders/{orderId}:
+    get:
+      tags: [Orders]
+      summary: Get one processed order
+      parameters:
+        - { name: orderId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: The processed order
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+        '404':
+          description: Not processed yet, parked in the DLT, or unknown
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /api/customers:
+    get:
+      tags: [Reference data]
+      summary: Customers with tier and credit limit (USD)
+      responses:
+        '200':
+          description: Customers
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    customerId: { type: string, example: C-100 }
+                    name: { type: string, example: Acme Corp }
+                    tier: { type: string, enum: [GOLD, SILVER, BRONZE] }
+                    creditLimitUsd: { type: number, example: 50000 }
+  /api/fx-rates:
+    get:
+      tags: [Reference data]
+      summary: Current FX rates (units of currency per 1 USD)
+      description: "`source` is `frankfurter` once NiFi has fetched the public feed, `seed` before that."
+      responses:
+        '200':
+          description: Rates
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    currency: { type: string, example: EUR }
+                    ratePerUsd: { type: number, example: 0.89469 }
+                    asOf: { type: string, format: date }
+                    source: { type: string, enum: [seed, frankfurter] }
+  /api/events:
+    get:
+      tags: [Orders]
+      summary: Server-sent events stream of pipeline outcomes
+      description: |
+        Event types: `processed` (from `orders.processed`), `dead-letter` (from `orders.raw.DLT`, with
+        `x-error-type` and `x-error-message`), and `invalid` (from `orders.invalid`, rejected by NiFi).
+        Requires role `orders-read`.
+      responses:
+        '200':
+          description: text/event-stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+  /api/me:
+    get:
+      tags: [Session]
+      summary: Who am I (username, roles, token expiry)
+      responses:
+        '200':
+          description: Current identity
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  username: { type: string }
+                  name: { type: string }
+                  clientId: { type: string }
+                  roles: { type: array, items: { type: string } }
+                  tokenExpiresAt: { type: string, format: date-time }
+        '401': { $ref: '#/components/responses/Problem' }
+  /login:
+    get:
+      tags: [Session]
+      security: []
+      summary: Start the browser login (redirects to Keycloak, code flow with PKCE)
+      responses:
+        '302': { description: Redirect to Keycloak }
+  /logout:
+    get:
+      tags: [Session]
+      security: []
+      summary: End the session here and in Keycloak
+      responses:
+        '302': { description: Redirect to Keycloak end-session endpoint }
+  /health:
+    get:
+      tags: [Session]
+      security: []
+      summary: Liveness
+      responses:
+        '200': { description: UP }
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Keycloak access token with audience `orders-api`.
+    session:
+      type: apiKey
+      in: cookie
+      name: vertx-web.session
+      description: Set by `/login`.
+  responses:
+    Problem:
+      description: RFC 9457 problem details
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+  schemas:
+    OrderRequest:
+      type: object
+      required: [customerId, product, quantity, amount]
+      properties:
+        customerId: { type: string, pattern: '^[A-Z]-\d{3}$', example: C-100 }
+        product: { type: string, maxLength: 128, example: Widget }
+        quantity: { type: integer, minimum: 1, maximum: 10000, example: 2 }
+        amount: { type: number, exclusiveMinimum: true, minimum: 0, example: 120.5 }
+        currency: { type: string, enum: [USD, EUR, GBP, INR], default: USD }
+        priority: { type: string, enum: [HIGH, NORMAL], default: NORMAL }
+    Accepted:
+      type: object
+      properties:
+        orderId: { type: string, format: uuid }
+        status: { type: string, enum: [ACCEPTED] }
+        statusUrl: { type: string, example: /api/orders/3f0c... }
+    Order:
+      type: object
+      properties:
+        orderId: { type: string, format: uuid }
+        customerId: { type: string }
+        customerName: { type: string }
+        customerTier: { type: string, enum: [GOLD, SILVER, BRONZE] }
+        product: { type: string }
+        quantity: { type: integer }
+        amount: { type: number }
+        currency: { type: string }
+        fxRate: { type: number, description: Units of currency per 1 USD used for conversion }
+        amountUsd: { type: number }
+        priority: { type: string, enum: [HIGH, NORMAL] }
+        status: { type: string, enum: [APPROVED, REJECTED] }
+        lane: { type: string, enum: [EXPRESS, STANDARD, NONE] }
+        reason: { type: string, description: Set when REJECTED }
+        source: { type: string, enum: [web-ui, partner-api, file-drop] }
+        submittedBy: { type: string }
+        receivedAt: { type: string, format: date-time }
+        processedAt: { type: string, format: date-time }
+    Problem:
+      type: object
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }

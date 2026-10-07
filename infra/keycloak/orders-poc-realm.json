@@ -1,0 +1,93 @@
+{
+  "realm": "orders-poc",
+  "enabled": true,
+  "sslRequired": "none",
+  "accessTokenLifespan": 1800,
+  "ssoSessionIdleTimeout": 3600,
+  "roles": {
+    "realm": [
+      { "name": "orders-read",  "description": "View orders and customers" },
+      { "name": "orders-write", "description": "Submit orders" }
+    ]
+  },
+  "users": [
+    {
+      "username": "alice",
+      "enabled": true,
+      "email": "alice@example.com",
+      "emailVerified": true,
+      "firstName": "Alice",
+      "lastName": "Operator",
+      "credentials": [{ "type": "password", "value": "alice", "temporary": false }],
+      "realmRoles": ["orders-read", "orders-write"]
+    },
+    {
+      "username": "bob",
+      "enabled": true,
+      "email": "bob@example.com",
+      "emailVerified": true,
+      "firstName": "Bob",
+      "lastName": "Viewer",
+      "credentials": [{ "type": "password", "value": "bob", "temporary": false }],
+      "realmRoles": ["orders-read"]
+    },
+    {
+      "username": "service-account-partner-client",
+      "enabled": true,
+      "serviceAccountClientId": "partner-client",
+      "realmRoles": ["orders-read", "orders-write"]
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "gateway-ui",
+      "name": "Vert.x gateway (BFF for the web UI)",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "gateway-ui-secret",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["http://localhost:8080/*"],
+      "webOrigins": ["http://localhost:8080"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:8080/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "orders-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.custom.audience": "orders-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "partner-client",
+      "name": "External partner system (machine to machine)",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "partner-secret",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "protocolMappers": [
+        {
+          "name": "orders-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.custom.audience": "orders-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ]
+}
