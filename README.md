@@ -35,6 +35,8 @@ Frankfurter FX API (public) ─> NiFi ─> Kafka fx.rates ─> Camel ─> fx_rat
 
 ## Run it
 
+> **Full guide: [how2run.md](how2run.md)** covers prerequisites, a five-minute demo, CLI usage, the generator, resets and troubleshooting.
+
 Needs Docker with about 6 GB of memory available.
 
 ```bash
@@ -70,6 +72,7 @@ GENERATOR_API_INTERVAL_MS=0 GENERATOR_FILE_INTERVAL_MS=0 docker compose up -d ge
 
 | Doc | Contents |
 |---|---|
+| [how2run.md](how2run.md) | Step-by-step run guide, demo script, troubleshooting |
 | [docs/architecture.md](docs/architecture.md) | Component diagram, happy-path sequence, failure paths, NiFi flow, security model, data model, ports and start-up order |
 | [docs/design-decisions.md](docs/design-decisions.md) | 15 ADRs (async 202, idempotency key, partition key, NiFi vs Camel, BFF, token passthrough, error classification, versions) plus the POC shortcuts and their production answers |
 | [docs/test-scenarios.md](docs/test-scenarios.md) | 14 automated scenarios and manual walkthroughs (UI tour, NiFi backpressure and provenance, Kafka CLI, tokens) |
@@ -91,4 +94,4 @@ data/inbox/                 partner CSV drop folder (mounted into NiFi)
 
 ## Verified
 
-Cold start (`docker compose down -v && docker compose up -d --build --wait`), then `scripts/e2e.sh` on Docker Desktop with 8 GB and 8 CPUs. The result is recorded in [docs/test-scenarios.md](docs/test-scenarios.md).
+On 2026-10-07, from a cold start (`docker compose down -v && docker compose up -d --build --wait`) on Docker Desktop with 8 GB and 8 CPUs, `scripts/e2e.sh` gave **61 passed, 0 failed**, covering all 14 scenarios including the resilience ones. Details are in [docs/test-scenarios.md](docs/test-scenarios.md).
