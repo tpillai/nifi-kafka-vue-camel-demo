@@ -47,10 +47,12 @@ services:
       KAFKA_HEAP_OPTS: "-Xms256m -Xmx512m"
     ports: ["9094:9094"]
     healthcheck:
+      # The check starts a JVM, which can take >10 s on a busy laptop; give it room so a working broker isn't flagged.
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
-      interval: 10s
-      timeout: 10s
+      interval: 15s
+      timeout: 45s
       retries: 20
+      start_period: 20s
 
   # One-shot: create topics explicitly (auto-create is off so typos fail loudly).
   kafka-init:

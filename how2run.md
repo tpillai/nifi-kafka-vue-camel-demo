@@ -162,6 +162,8 @@ docker compose rm -sfv nifi nifi-setup && docker compose up -d --wait
 | Login loops or `Invalid token` | Browser opened via `127.0.0.1` instead of `localhost`, so the issuer doesn't match | Always use `http://localhost:8080` |
 | FX rates show `source = seed` | NiFi cannot reach api.frankfurter.dev (offline or proxy) | Orders still work with the seed rates. Check the bulletins on the **Poll Frankfurter FX rates** processor in NiFi. |
 | `Invalid SNI` errors from NiFi after editing compose | NiFi's certificate was generated for an old hostname and kept in a volume | `docker compose rm -sfv nifi nifi-setup && docker compose up -d` |
+| Kafka shows `unhealthy` but orders still flow | Older compose file: the health check's 10 s timeout was too short on a busy machine | Pull the latest `docker-compose.yml` (timeout is now 45 s), then `docker compose up -d kafka kafka-init` |
+| Nothing is processed after Kafka was recreated on its own | The Kafka container keeps topics only for its lifetime, so recreating it drops them | `docker compose up -d kafka-init` to recreate the topics; the services reconnect by themselves |
 | e2e step 13 fails right after a previous run | alice's rate-limit window is still full | Wait 60 s and rerun |
 
 ## 11. Building outside Docker (optional)
